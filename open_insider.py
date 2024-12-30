@@ -2,12 +2,19 @@ from bs4 import BeautifulSoup as Soup
 import requests
 import pandas as pd
 import time
+import datetime
 import os
 
-y, m, d = '2023', '06', '11'
-p = 1
+today = datetime.date.today()
+y, m, d = today.year, today.month, today.day
+page = 1 
 column_names = ['X', 'Filling', 'Trade', 'tick', 'company_name', 'insider_name',
                 'title', 'type', 'price', 'qty', 'owned', 'delta_owned', 'value']
+output_path = 'oi_csv.csv'
+
+
+if os.path.exists(output_path):
+    os.remove(output_path)
 
 while int(y) > 2000:
     start = time.time()
@@ -16,9 +23,9 @@ while int(y) > 2000:
     url1 = f'http://openinsider.com/screener?s=&o=&pl=&ph=&ll=&lh=&fd=-1&fdr=01%2F01%2F1999+-+{max_date}&td=0&td' \
            'r=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&xa=1&xd=1&xg=1&xf=1&xm=1&xx=1&xc=1&xw=1&excludeDerivRelated=1&vl=&vh' \
            '=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol' \
-           f'=0&cnt=1000&page={p}'
+           f'=0&cnt=1000&page={page}'
 
-    get_result = requests.get(url1).text
+    get_result = requests.get(url1, timeout=1000).text
     soup = Soup(get_result, 'html.parser')
 
     table = soup.find("table", {"class": "tinytable"})
@@ -37,12 +44,11 @@ while int(y) > 2000:
     new_date = small_oi_frame.tail(1)['Filling'].to_list()[0][0:10].split('-')
 
     if new_date == [y, m, d]:
-        p += 1
+        page += 1
     else:
         y, m, d = new_date
-        p = 1
+        page = 1
 
-    output_path = 'oi_csv_2.csv'
     small_oi_frame.to_csv(output_path, mode='a', index=False, header=not os.path.exists(output_path))
     elapsed = time.time() - start
 
