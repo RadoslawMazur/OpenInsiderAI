@@ -54,6 +54,6 @@ while int(y) > 2000:
 
     print(f'Done {d}.{m}.{y} Elapsed time: {elapsed} Rows:{len(small_oi_frame)}', end='\r')
 
-    time.sleep(abs(10 - elapsed)%10)
+    time.sleep(abs(5 - elapsed)%5)
 
 

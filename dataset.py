@@ -18,27 +18,29 @@ class TradeDataset(Dataset):
     def _get_us_gdp(self) -> pd.DataFrame:
 
         # TODO fix this function
-        gdp_data = web.DataReader('GDP', 'fred', start, end)
-        df = pd.read_csv(f"{name}.csv")
-        for i in range(1,4):
-            df[f"{i}q_change"] = (df[name] / df[name].shift(i) - 1) * 100
-        for i in range(1*4, 4*4, 4):
-            df[f"{i}y_change"] = (df[name] / df[name].shift(i) - 1) * 100
+        df = web.DataReader('GDP', 'fred', self.start_date, self.end_date).reset_index()
+
+        start_day_abs_week = self.start_date.isocalendar()[1] + self._add_weeks_per_year(self.start_date.year)
+        end_day_abs_week = self.end_date.isocalendar()[1] + self._add_weeks_per_year(self.end_date.year)
+        table_range = range(start_day_abs_week, end_day_abs_week)
 
         df[["year", "week", "day"]] = pd.to_datetime(df["DATE"]).dt.isocalendar()
         df["abs_week"] = df["week"] + df["year"].apply(self._add_weeks_per_year)
         df = df[df["abs_week"] > 0]
-        df = pd.merge(pd.DataFrame(range(df["abs_week"].min(), df["abs_week"].max()), columns=["abs_week"]), df, how="left").bfill()
+        df = pd.merge(pd.DataFrame(table_range, columns=["abs_week"]), df, how="left")
+        df["GDP"] = df["GDP"].ffill()
+
+        for i in [52, 104]:
+            df[f"{i}w_GDP_change"] = (df["GDP"] / df["GDP"].shift(i) - 1) * 100
+
+        df = df.bfill()
         
-        return df[["abs_week", name, "1q_change", "2q_change", "3q_change", "4y_change", "8y_change", "12y_change"]]
+        return df[["abs_week", "52w_GDP_change", "104w_GDP_change"]]
     
     def _get_interest_rate(self) -> pd.DataFrame:
 
         # TODO fix this function
-        interest_rate = web.DataReader('FEDFUNDS', 'fred', start, end)
-        
-        for i in range(3,15,3):
-            df[f"{i}m"] = df[name].shift(i)
+        df = web.DataReader('FEDFUNDS', 'fred', self.start_date, self.end_date).reset_index()
         
         df[["year", "week", "day"]] = pd.to_datetime(df["DATE"]).dt.isocalendar()
         df["abs_week"] = df["week"] + df["year"].apply(self._add_weeks_per_year)
@@ -46,6 +48,13 @@ class TradeDataset(Dataset):
         df = pd.merge(pd.DataFrame(range(df["abs_week"].min(), df["abs_week"].max()), columns=["abs_week"]), df, how="left").bfill()
 
         return df[["abs_week", name, "3m", "6m", "9m", "12m"]]
+    
+    def _get_market_table(self):
+        us_gdp_df = self._get_us_gdp()
+        interest_rate = self._get_interest_rate()
+
+        return pd.merge(us_gdp_df, interest_rate, how="inner", on="abs_week")
+
 
     @cache # cache is crucial here
     def _add_weeks_per_year(self, year) -> int:
@@ -59,6 +68,11 @@ class TradeDataset(Dataset):
         df = pd.read_csv("oi_csv.csv", usecols=["Filling", "Trade", "tick", "title", "type", "price", "qty", "owned", "delta_owned", "value"]).drop_duplicates().dropna(subset=["Filling"])
 
         # TODO here is the place to limit the start and end dates (?????)
+        # parse the dates
+        df["Trade"] =  pd.to_datetime(df["Trade"])
+        df["Filling"] =  pd.to_datetime(df["Filling"])
+
+        df = df[(df["Trade"] > self.start_date) & (df["Trade"] < self.end_date)]
 
         # filter ticks to those price history is available
         df["tick"] = df["tick"].str.strip(" ")
@@ -76,9 +90,6 @@ class TradeDataset(Dataset):
         df["delta_owned"] = df["delta_owned"].str.rstrip("%").str.replace("New", "0").str.replace(">999", "1000").fillna(0).astype("int16")
         df["value"] = df["value"].str.replace("[$,]", "", regex=True).fillna(0).astype("int32")
 
-        # parse the dates
-        df["Trade"] =  pd.to_datetime(df["Trade"])
-        df["Filling"] =  pd.to_datetime(df["Filling"])
 
         # get some info from title
         df["is_dir"] = df["title"].str.lower().str.contains("dir").astype(float)
@@ -166,16 +177,20 @@ class TradeDataset(Dataset):
 
         return df[["abs_week", "1w_change", "2w_change", "3w_change", "4w_change"]]
 
-    def __init__(self, seq_len: int, start_date: Optional[str] = None, end_date: Optional[str] = None):
+    def __init__(
+            self,
+            seq_len: int,
+            start_date: Optional[datetime.datetime] = None, 
+            end_date: Optional[datetime.datetime] = None
+        ):
 
-        self.start_date = start_date
-        self.end_date = end_date
+        self.start_date = start_date if start_date else datetime.datetime.strptime("01-01-1999", "%d-%m-%Y")
+        self.end_date = end_date if end_date else datetime.datetime.today()
 
         self.seq_len = seq_len
-        #self.us_gdp_df = self._get_us_gdp()
-        #self.interest_rate = self._get_interest_rate()
         self.insider_df = self._get_insider_trades()
         self.tick_borders = self._get_tick_borders()
+        self.market_table = self._get_market_table()
 
     def __len__(self) -> int:
         #return (self.insider_df.groupby("tick")["abs_week"].max() - self.insider_df.groupby("tick")["abs_week"].min() - self.seq_len).sum()
@@ -183,6 +198,7 @@ class TradeDataset(Dataset):
 
     @cache 
     def _get_insider_df_for_tick(self, tick: str) -> pd.DataFrame:
+        # This function brings __getitem__ from 20ms to 2ms because merge is much faster
         return self.insider_df[self.insider_df["tick"] == tick]
 
     def __getitem__(self, index: int) -> List[torch.Tensor]:
@@ -202,9 +218,9 @@ class TradeDataset(Dataset):
         # creating X dataframe
         df = pd.DataFrame(zip([tick.iloc[0]] * self.seq_len, range(start_day.iloc[0], stop_day.iloc[0])), columns=["tick", "abs_week"])
         df = pd.merge(df, self._get_insider_df_for_tick(tick.iloc[0]), on=["tick", "abs_week"], how="left")
-        df.iloc[:,2:] = df.iloc[:,2:].fillna(0.)
+        df = pd.merge(df, self.market_table, on=["abs_week"], how="left")
+        df.iloc[:,2:] = df.iloc[:,2:].fillna(0.) 
         #df = pd.merge(df, self.interest_rate, on=["abs_week"], how="left") #TODO premerge those dfs
-        #df = pd.merge(df, self.us_gdp_df, on=["abs_week"], how="left")
 
         # the df cannot be empty
         assert not (df.isna().any().any()), "df is empty"
@@ -226,7 +242,6 @@ if __name__ == "__main__":
     data = []
     print(len(dt))
     for i in tqdm.tqdm(range(len(dt))):
-        # i = random.choice(range(0, len(dt)))
         start_time = time_ns()
         try:
             xy = dt[i]
@@ -235,9 +250,6 @@ if __name__ == "__main__":
             print(f"Error on index {i}")
             raise e
 
-        if i > 1001:
-            break 
-        # data.append(sum([(week == torch.zeros(week.shape)).all() for week in xy[0]])/8)
 
     
     print("Average execution time:")
