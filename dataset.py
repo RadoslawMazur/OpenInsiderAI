@@ -17,7 +17,6 @@ class TradeDataset(Dataset):
 
     def _get_us_gdp(self) -> pd.DataFrame:
 
-        # TODO fix this function
         df = web.DataReader('GDP', 'fred', self.start_date, self.end_date).reset_index()
 
         start_day_abs_week = self.start_date.isocalendar()[1] + self._add_weeks_per_year(self.start_date.year)
@@ -39,15 +38,22 @@ class TradeDataset(Dataset):
     
     def _get_interest_rate(self) -> pd.DataFrame:
 
-        # TODO fix this function
         df = web.DataReader('FEDFUNDS', 'fred', self.start_date, self.end_date).reset_index()
+
+        start_day_abs_week = self.start_date.isocalendar()[1] + self._add_weeks_per_year(self.start_date.year)
+        end_day_abs_week = self.end_date.isocalendar()[1] + self._add_weeks_per_year(self.end_date.year)
+        table_range = range(start_day_abs_week, end_day_abs_week)
         
         df[["year", "week", "day"]] = pd.to_datetime(df["DATE"]).dt.isocalendar()
         df["abs_week"] = df["week"] + df["year"].apply(self._add_weeks_per_year)
         df = df[df["abs_week"] > 0]
-        df = pd.merge(pd.DataFrame(range(df["abs_week"].min(), df["abs_week"].max()), columns=["abs_week"]), df, how="left").bfill()
+        df = pd.merge(pd.DataFrame(table_range, columns=["abs_week"]), df, how="left").bfill()
+        df["FEDFUNDS"] = df["FEDFUNDS"].ffill()
 
-        return df[["abs_week", name, "3m", "6m", "9m", "12m"]]
+        for i in [26, 52]:
+            df[f"{i}w_FEDFUNDS_change"] = (df["FEDFUNDS"] / df["FEDFUNDS"].shift(i) - 1) * 100
+
+        return df[["abs_week", "FEDFUNDS", "26w_FEDFUNDS_change", "52w_FEDFUNDS_change"]]
     
     def _get_market_table(self):
         us_gdp_df = self._get_us_gdp()
@@ -117,7 +123,7 @@ class TradeDataset(Dataset):
 
         df = self.insider_df
         # this is a function to get first and last insider trade for each tick
-        df = pd.merge(df.groupby("tick")["abs_week"].max() - self.seq_len, df.groupby("tick")["abs_week"].min(), left_index=True, right_index=True)
+        df = pd.merge(df.groupby("tick")["abs_week"].max() - self.seq_len - 4, df.groupby("tick")["abs_week"].min(), left_index=True, right_index=True)
 
         # merge with price data
         price_df = self._get_tick_borders_from_price()
@@ -171,7 +177,7 @@ class TradeDataset(Dataset):
 
         # calcaulte percent change in price from of one week to other
         for i in range(1,5):
-            df[f"{i}w_change"] = ((df["mean_price"] / df["mean_price"].shift(i)) - 1) * 100
+            df[f"{i}w_change"] = ((df["mean_price"].shift(-i) / df["mean_price"]) - 1) * 100
 
         df = df[df["abs_week"] > 0]
 
@@ -220,15 +226,14 @@ class TradeDataset(Dataset):
         df = pd.merge(df, self._get_insider_df_for_tick(tick.iloc[0]), on=["tick", "abs_week"], how="left")
         df = pd.merge(df, self.market_table, on=["abs_week"], how="left")
         df.iloc[:,2:] = df.iloc[:,2:].fillna(0.) 
-        #df = pd.merge(df, self.interest_rate, on=["abs_week"], how="left") #TODO premerge those dfs
 
         # the df cannot be empty
-        assert not (df.isna().any().any()), "df is empty"
 
         # creating y dataframe
         ydf = self._get_tick_dataframe(tick.iloc[0])
         ydf = ydf[ydf["abs_week"].between(start_day.iloc[0], stop_day.iloc[0]-1)][["abs_week", "1w_change", "2w_change", "3w_change", "4w_change"]]
         assert len(ydf) == len(df), "dfs must be equal"
+        assert not (ydf.isna().any().any()), "df is empty"
 
         X = torch.Tensor(df.drop(["tick", "abs_week"], axis=1).astype("float32").values)
         y = torch.Tensor(ydf.drop("abs_week", axis=1).astype("float32").values)
@@ -237,21 +242,29 @@ class TradeDataset(Dataset):
 
 
 if __name__ == "__main__":
-    dt = TradeDataset(16)
+
+    start_time = None #datetime.datetime.strptime("02-01-2022", "%d-%m-%Y")
+    end_time = datetime.datetime.strptime("01-01-2022", "%d-%m-%Y")
+    dt = TradeDataset(10, start_date=start_time, end_date=end_time)
+
     times = []
     data = []
-    print(len(dt))
+    data_present = 0
+
     for i in tqdm.tqdm(range(len(dt))):
         start_time = time_ns()
         try:
             xy = dt[i]
             times.append((time_ns() - start_time)/10**6)
-        except Exception as e:
+            data_present += (xy[0][:, 0].sum() != 0) * 1
+
+        except (AssertionError, Exception) as e:
             print(f"Error on index {i}")
             raise e
 
 
-    
     print("Average execution time:")
     print(sum(times)/len(times))
     print("ms")
+    print("Percentage of data present")
+    print(data_present/len(dt) * 100)
