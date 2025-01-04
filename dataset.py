@@ -222,16 +222,20 @@ class TradeDataset(Dataset):
         assert tick.size != 0 or tick.size > 2, "Only one tick should be selected"
 
         # creating X dataframe
+        price_df = self._get_tick_dataframe(tick.iloc[0])
+        price_df_shifted = price_df[["abs_week", "1w_change"]]
+        price_df_shifted.loc[:, "abs_week"] = price_df_shifted.loc[:, "abs_week"] - 1
+
         df = pd.DataFrame(zip([tick.iloc[0]] * self.seq_len, range(start_day.iloc[0], stop_day.iloc[0])), columns=["tick", "abs_week"])
         df = pd.merge(df, self._get_insider_df_for_tick(tick.iloc[0]), on=["tick", "abs_week"], how="left")
         df = pd.merge(df, self.market_table, on=["abs_week"], how="left")
+        df = pd.merge(df, price_df_shifted, on=["abs_week"], how="left")
         df.iloc[:,2:] = df.iloc[:,2:].fillna(0.) 
 
         # the df cannot be empty
 
         # creating y dataframe
-        ydf = self._get_tick_dataframe(tick.iloc[0])
-        ydf = ydf[ydf["abs_week"].between(start_day.iloc[0], stop_day.iloc[0]-1)][["abs_week", "1w_change", "2w_change", "3w_change", "4w_change"]]
+        ydf = price_df[price_df["abs_week"].between(start_day.iloc[0], stop_day.iloc[0]-1)][["abs_week", "1w_change", "2w_change", "3w_change", "4w_change"]]
         assert len(ydf) == len(df), "dfs must be equal"
         assert not (ydf.isna().any().any()), "df is empty"
 
