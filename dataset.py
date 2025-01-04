@@ -11,7 +11,6 @@ import pandas_datareader.data as web
 import datetime
 import tqdm
 
-# TODO add someway to limit the date
 
 class TradeDataset(Dataset):
 
@@ -175,17 +174,21 @@ class TradeDataset(Dataset):
         df = pd.merge(all_timestamps, df, on="abs_week", how="left")
         df["mean_price"] = df["mean_price"].ffill()
 
-        # calcaulte percent change in price from of one week to other
+        # change in price for X 
+        df[f"-1w_change"] = df["mean_price"] / df["mean_price"].shift(1)
+
+        # calcaulte percent change in price in future weeks
         for i in range(1,5):
             df[f"{i}w_change"] = ((df["mean_price"].shift(-i) / df["mean_price"]) - 1) * 100
 
         df = df[df["abs_week"] > 0]
 
-        return df[["abs_week", "1w_change", "2w_change", "3w_change", "4w_change"]]
+        return df[["abs_week", "-1w_change", "1w_change", "2w_change", "3w_change", "4w_change"]]
 
     def __init__(
             self,
             seq_len: int,
+            to_save: bool = False,
             start_date: Optional[datetime.datetime] = None, 
             end_date: Optional[datetime.datetime] = None
         ):
@@ -194,6 +197,7 @@ class TradeDataset(Dataset):
         self.end_date = end_date if end_date else datetime.datetime.today()
 
         self.seq_len = seq_len
+        self.to_save = to_save
         self.insider_df = self._get_insider_trades()
         self.tick_borders = self._get_tick_borders()
         self.market_table = self._get_market_table()
@@ -207,7 +211,7 @@ class TradeDataset(Dataset):
         # This function brings __getitem__ from 20ms to 2ms because merge is much faster
         return self.insider_df[self.insider_df["tick"] == tick]
 
-    def __getitem__(self, index: int) -> List[torch.Tensor]:
+    def __getitem__(self, index: int) -> List[torch.Tensor]: # 2.5ms
 
         # select which the tick using rolling week as an index
         week = self.tick_borders.loc[self.tick_borders["rolling_week"] < index+1, "rolling_week"].max()
@@ -223,13 +227,11 @@ class TradeDataset(Dataset):
 
         # creating X dataframe
         price_df = self._get_tick_dataframe(tick.iloc[0])
-        price_df_shifted = price_df[["abs_week", "1w_change"]]
-        price_df_shifted.loc[:, "abs_week"] = price_df_shifted.loc[:, "abs_week"] - 1
 
         df = pd.DataFrame(zip([tick.iloc[0]] * self.seq_len, range(start_day.iloc[0], stop_day.iloc[0])), columns=["tick", "abs_week"])
         df = pd.merge(df, self._get_insider_df_for_tick(tick.iloc[0]), on=["tick", "abs_week"], how="left")
         df = pd.merge(df, self.market_table, on=["abs_week"], how="left")
-        df = pd.merge(df, price_df_shifted, on=["abs_week"], how="left")
+        df = pd.merge(df, price_df[["abs_week", "-1w_change"]], on=["abs_week"], how="left")
         df.iloc[:,2:] = df.iloc[:,2:].fillna(0.) 
 
         # the df cannot be empty
@@ -238,33 +240,30 @@ class TradeDataset(Dataset):
         ydf = price_df[price_df["abs_week"].between(start_day.iloc[0], stop_day.iloc[0]-1)][["abs_week", "1w_change", "2w_change", "3w_change", "4w_change"]]
         assert len(ydf) == len(df), "dfs must be equal"
         assert not (ydf.isna().any().any()), "df is empty"
+        
+        if not self.to_save:
+            X = torch.Tensor(df.drop(["tick", "abs_week"], axis=1).astype("float32").values)
+            y = torch.Tensor(ydf.drop("abs_week", axis=1).astype("float32").values)
+            return X, y
+        else:
+            return df.merge(ydf, on="abs_week", how="inner")
 
-        X = torch.Tensor(df.drop(["tick", "abs_week"], axis=1).astype("float32").values)
-        y = torch.Tensor(ydf.drop("abs_week", axis=1).astype("float32").values)
 
-        return X, y
 
 
 if __name__ == "__main__":
 
-    start_time = None #datetime.datetime.strptime("02-01-2022", "%d-%m-%Y")
-    end_time = datetime.datetime.strptime("01-01-2022", "%d-%m-%Y")
-    dt = TradeDataset(10, start_date=start_time, end_date=end_time)
+    start_time = None # datetime.datetime.strptime("02-01-2022", "%d-%m-%Y")
+    end_time = None # datetime.datetime.strptime("01-01-2022", "%d-%m-%Y")
+    dt = TradeDataset(1, start_date=start_time, end_date=end_time, to_save=True)
 
     times = []
     data = []
     data_present = 0
+    dt[0].to_csv('dataset.csv')
 
-    for i in tqdm.tqdm(range(len(dt))):
-        start_time = time_ns()
-        try:
-            xy = dt[i]
-            times.append((time_ns() - start_time)/10**6)
-            data_present += (xy[0][:, 0].sum() != 0) * 1
-
-        except (AssertionError, Exception) as e:
-            print(f"Error on index {i}")
-            raise e
+    for i in tqdm.tqdm(range(1, len(dt))):
+        dt[i].to_csv('dataset.csv', mode='a', header=False)
 
 
     print("Average execution time:")
