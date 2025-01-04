@@ -116,7 +116,30 @@ class TradeDataset(Dataset):
         df = pd.merge(df, transaction_types, left_index=True, right_index=True)
         df = df.drop("type", axis=1)
 
-        return df.groupby(["tick", "abs_week"]).mean().reset_index()
+        week_df = df.groupby(["tick", "abs_week"]).agg({
+            "price": "mean",  # Calculate mean for "value1"
+            "qty": "sum",   # Calculate sum for "value2"
+            "owned": "sum",    # Calculate max for "value3"
+            "delta_owned": "sum",
+            "value": "mean",
+            "is_dir": "sum",
+            "is_ceo": "sum",
+            "is_major_steakholder": "sum",
+            "d_to_filling": "mean",
+            'A - Grant': "sum", 
+            'C - Converted deriv': "sum", 
+            'D - Sale to issuer': "sum", 
+            'F - Tax': "sum",
+            'G - Gift': "sum", 
+            'M - OptEx': "sum", 
+            'P - Purchase': "sum", 
+            'S - Sale': "sum", 
+            'W - Inherited': "sum",
+            'X - OptEx': "sum"
+
+        })
+
+        return week_df.reset_index()
     
     def _get_tick_borders(self):
 
