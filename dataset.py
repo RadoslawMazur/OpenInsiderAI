@@ -1,4 +1,4 @@
-from torch.utils.data import Dataset
+import concurrent.futures
 import torch
 from typing import List, Optional
 import pandas as pd
@@ -9,10 +9,11 @@ from functools import cache
 import os
 import pandas_datareader.data as web
 import datetime
-import tqdm
+import concurrent
+from tqdm import tqdm
 
 
-class TradeDataset(Dataset):
+class TradeDataset:
 
     def _get_us_gdp(self) -> pd.DataFrame:
 
@@ -50,7 +51,7 @@ class TradeDataset(Dataset):
         df["FEDFUNDS"] = df["FEDFUNDS"].ffill()
 
         for i in [26, 52]:
-            df[f"{i}w_FEDFUNDS_change"] = (df["FEDFUNDS"] / df["FEDFUNDS"].shift(i) - 1) * 100
+            df[f"{i}w_FEDFUNDS_change"] = (df["FEDFUNDS"] / df["FEDFUNDS"].shift(i) - 1)
 
         return df[["abs_week", "FEDFUNDS", "26w_FEDFUNDS_change", "52w_FEDFUNDS_change"]]
     
@@ -69,13 +70,29 @@ class TradeDataset(Dataset):
             weeks += isoweek.Week.last_week_of_year(y)[1]
         return int(weeks)
 
+    @classmethod 
+    def week_to_date(cls, abs_week: int) -> datetime.datetime:
+
+        start_year = 1999
+        pass
+
+    @classmethod
+    def date_to_week(cls, date: datetime.datetime) -> int:
+
+        year = date.year
+        start_year = 1999
+        weeks = 0 if year>=start_year else -999
+        for y in range(start_year, year):
+            weeks += isoweek.Week.last_week_of_year(y)[1]
+        return int(weeks) + int(date.isocalendar()[1])
+
     def _get_insider_trades(self) -> pd.DataFrame:
-        df = pd.read_csv("oi_csv.csv", usecols=["Filling", "Trade", "tick", "title", "type", "price", "qty", "owned", "delta_owned", "value"]).drop_duplicates().dropna(subset=["Filling"])
+        df = pd.read_csv("oi_csv.csv", usecols=["Filling", "Trade", "tick", "title", "type", "price", "qty", "owned", "delta_owned", "value"]).drop_duplicates().dropna(subset="tick")
 
         # TODO here is the place to limit the start and end dates (?????)
         # parse the dates
         df["Trade"] =  pd.to_datetime(df["Trade"])
-        df["Filling"] =  pd.to_datetime(df["Filling"])
+        df["Filling"] =  pd.to_datetime(df["Filling"]).fillna(df["Trade"])
 
         df = df[(df["Trade"] > self.start_date) & (df["Trade"] < self.end_date)]
 
@@ -189,24 +206,26 @@ class TradeDataset(Dataset):
         df["mean_price"] = (df["High"] + df["Low"])/2
 
         # figure out mean week price
-        df = df[["abs_week", "year", "week", "mean_price"]].groupby(["year", "week"]).mean().reset_index()
+        df = df[["abs_week", "year", "week", "mean_price", "Volume"]].groupby(["year", "week"]).mean().reset_index()
         df["abs_week"] = df["abs_week"].astype(int)
 
         # if there are any missing weeks fill them with previous week
         all_timestamps = pd.DataFrame({"abs_week": range(df["abs_week"].min(), df["abs_week"].max() + 1)})
         df = pd.merge(all_timestamps, df, on="abs_week", how="left")
         df["mean_price"] = df["mean_price"].ffill()
+        df["volume"] = df["Volume"].ffill() + 0.01 # to avide 0
 
         # change in price for X 
         df[f"-1w_change"] = df["mean_price"] / df["mean_price"].shift(1)
+        df[f"-1w_change_volume"] = df["Volume"] / df["Volume"].shift(1)
 
         # calcaulte percent change in price in future weeks
         for i in range(1,5):
-            df[f"{i}w_change"] = ((df["mean_price"].shift(-i) / df["mean_price"]) - 1) * 100
+            df[f"{i}w_change"] = (df["mean_price"].shift(-i) / df["mean_price"]) - 1
 
         df = df[df["abs_week"] > 0]
 
-        return df[["abs_week", "-1w_change", "1w_change", "2w_change", "3w_change", "4w_change"]]
+        return df[["abs_week", "-1w_change", "1w_change", "2w_change", "3w_change", "4w_change", "volume", "-1w_change_volume"]]
 
     def __init__(
             self,
@@ -254,7 +273,7 @@ class TradeDataset(Dataset):
         df = pd.DataFrame(zip([tick.iloc[0]] * self.seq_len, range(start_day.iloc[0], stop_day.iloc[0])), columns=["tick", "abs_week"])
         df = pd.merge(df, self._get_insider_df_for_tick(tick.iloc[0]), on=["tick", "abs_week"], how="left")
         df = pd.merge(df, self.market_table, on=["abs_week"], how="left")
-        df = pd.merge(df, price_df[["abs_week", "-1w_change"]], on=["abs_week"], how="left")
+        df = pd.merge(df, price_df[["abs_week", "-1w_change", "volume", "-1w_change_volume"]], on=["abs_week"], how="left")
         df.iloc[:,2:] = df.iloc[:,2:].fillna(0.) 
 
         # the df cannot be empty
@@ -276,21 +295,17 @@ class TradeDataset(Dataset):
 
 if __name__ == "__main__":
 
-    start_time = None # datetime.datetime.strptime("02-01-2022", "%d-%m-%Y")
-    end_time = None # datetime.datetime.strptime("01-01-2022", "%d-%m-%Y")
+    start_time = None #datetime.datetime.strptime("02-01-2020", "%d-%m-%Y")
+    end_time = None # datetime.datetime.strptime("01-03-2023", "%d-%m-%Y")
     dt = TradeDataset(1, start_date=start_time, end_date=end_time, to_save=True)
 
     times = []
     data = []
     data_present = 0
-    dt[0].to_csv('dataset.csv')
+    dt[0].to_csv('dataset2.csv')
 
-    for i in tqdm.tqdm(range(1, len(dt))):
-        dt[i].to_csv('dataset.csv', mode='a', header=False)
+    for i in tqdm(range(1, len(dt))):
+        dt[i].to_csv('dataset2.csv', mode='a', header=False)
 
 
-    print("Average execution time:")
-    print(sum(times)/len(times))
-    print("ms")
-    print("Percentage of data present")
-    print(data_present/len(dt) * 100)
+    print("Saving!")

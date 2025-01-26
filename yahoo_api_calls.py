@@ -38,7 +38,6 @@ def download_price_history(ticker, start_date="2000-01-01", output_dir="data"):
     return ticker, len(data)
 
 tickers = pd.read_csv("oi_csv.csv", usecols=["tick"])["tick"].str.strip(" ").dropna().unique().tolist()
-tickers.extend(["SPY", "^DJI"])
 avail_ticks = []
 
 for tick in tqdm(tickers):

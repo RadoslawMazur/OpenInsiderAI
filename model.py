@@ -9,105 +9,44 @@ import pandas as pd
 import math
 import torchinfo 
 import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
 
-# Transformer Model
-class TimeSeriesTransformer(nn.Module):
-    def __init__(self, input_dim, output_dim, seq_len, d_model=128, nhead=8, num_layers=4, dropout=0.1):
-        super(TimeSeriesTransformer, self).__init__()
-        self.input_dim = input_dim
-        self.d_model = d_model
-        
-        # Embedding layer to project input to d_model dimensions
-        self.embedding = nn.Linear(input_dim, d_model)
-        
-        # Positional Encoding
-        self.positional_encoding = nn.Parameter(torch.zeros(seq_len, d_model))
-        
-        # Transformer Encoder
-        self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dropout=dropout),
-            num_layers=num_layers
-        )
-        
-        # Output projection
-        self.fc_out = nn.Linear(d_model, output_dim)
 
-    def forward(self, x):
-        # x: (batch_size, seq_len, input_dim)
-        batch_size, seq_len, _ = x.size()
-        
-        # Add positional encoding
-        x = self.embedding(x) + self.positional_encoding[:seq_len, :]
-        
-        # Transform to (seq_len, batch_size, d_model) for transformer
-        x = x.permute(1, 0, 2)
-        
-        # Transformer Encoder
-        x = self.transformer(x)
-        
-        # Transform back to (batch_size, seq_len, d_model)
-        x = x.permute(1, 0, 2)
-        
-        # Output projection
-        output = self.fc_out(x)
-        return output
-
+# Positional Encoding
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=200):
+    def __init__(self, d_model, max_len=500):
         super(PositionalEncoding, self).__init__()
-        
-        # Create a positional encoding matrix
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        
-        # Generate div_term for all dimensions (even and odd)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        
-        # Handle sine for even indices
-        pe[:, 0::2] = torch.sin(position * div_term)
-        
-        # Handle cosine for odd indices
-        if d_model % 2 != 0:
-            # For odd d_model, pad div_term for the odd part
-            pe[:, 1::2] = torch.cos(position * div_term[:d_model // 2])
-        else:
-            pe[:, 1::2] = torch.cos(position * div_term)
-
-        pe = pe.unsqueeze(0)
-        pe.requires_grad = True
-        self.register_buffer('pe', pe)
+        position = torch.arange(0, max_len).unsqueeze(1).float()
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model)
+        )
+        self.encoding = torch.zeros(max_len, d_model)
+        self.encoding[:, 0::2] = torch.sin(position * div_term)
+        self.encoding[:, 1::2] = torch.cos(position * div_term)
+        self.encoding = self.encoding.unsqueeze(0)
 
     def forward(self, x):
-        seq_len = x.size(1)
-        return x + self.pe[:, :seq_len, :]
-
-
-       
+        return x + self.encoding[:, :x.size(1), :].to(x.device)
+    
 
 class TransAm(nn.Module):
-    def __init__(self, feature_size=250, input_dim=25, output_dim=1, seq_len=16, num_layers=1, n_head=8, dropout=0.1):
+    def __init__(self, feature_size=250, 
+                 output_dim=1, seq_len=16, 
+                 num_layers=1, n_head=8,
+                 dropout=0.1, dim_feedforward=16):
         super(TransAm, self).__init__()
         self.model_type = 'Transformer'
         self.src_mask = None
         
-        # Embedding layer to map input_dim -> feature_size
-        self.embedding = nn.Linear(input_dim, feature_size)
+        # self.embedding = nn.Linear(input_dim, feature_size)
         
-        # Positional encoding
         self.pos_encoder = PositionalEncoding(feature_size)
         
-        # Transformer Encoder
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=feature_size, nhead=n_head, dropout=dropout)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=feature_size, nhead=n_head, dropout=dropout, dim_feedforward=dim_feedforward)
         self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)
         
-        # Decoder layer to map feature_size -> output_dim
-        self.decoder = nn.Linear(feature_size, output_dim)
-        # self.init_weights()
+        self.decoder = nn.Linear(feature_size*seq_len, output_dim)
 
-    #def init_weights(self):
-    #    initrange = 0.1    
-    #    self.decoder.bias.data.zero_()
-    #    self.decoder.weight.data.uniform_(-initrange, initrange)
 
     def forward(self, src):
         """
@@ -122,7 +61,7 @@ class TransAm(nn.Module):
             self.src_mask = mask
 
         # Apply embedding layer
-        src = self.embedding(src)  # Shape: (batch_size, seq_len, feature_size)
+        # src = self.embedding(src)  # Shape: (batch_size, seq_len, feature_size)
         
         # Permute to (seq_len, batch_size, feature_size)
         src = src.permute(1, 0, 2)
@@ -135,6 +74,7 @@ class TransAm(nn.Module):
         
         # Permute back to (batch_size, seq_len, feature_size) and decode
         output = output.permute(1, 0, 2)
+        output = output.flatten(start_dim=1)
         output = self.decoder(output)
         return output
 
@@ -147,7 +87,16 @@ class TransAm(nn.Module):
     
 
 class GroupedSequenceDataset(Dataset):
-    def __init__(self, csv_file: str, group_column: str = "tick", seq_length: int = 8, n_weeks: int = 4, start_week: int = 0, end_week: int = 9999):
+    def __init__(self, 
+                 csv_file: str,
+                 ticker: str,
+                 group_column: str = "tick", 
+                 seq_length: int = 8, 
+                 n_weeks: int = 4, 
+                 start_week: int = 0, 
+                 end_week: int = 9999,
+                 scaler: StandardScaler|None = None
+                 ):
         """
         Args:
             csv_file (str): Path to the CSV file.
@@ -156,6 +105,23 @@ class GroupedSequenceDataset(Dataset):
         """
         data = pd.read_csv(csv_file)
         self.data = data[data["abs_week"].between(start_week, end_week)]
+        self.data = self.data[self.data["tick"] == ticker]
+
+        self.x_columns = ['qty', 'owned', 'volume', '-1w_change_volume',
+            'delta_owned', 'value', 'is_dir', 'is_ceo', 'is_major_steakholder',
+            'd_to_filling', 'A - Grant', 'C - Converted deriv',
+            'D - Sale to issuer', 'F - Tax', 'G - Gift', 'M - OptEx',
+            'P - Purchase', 'S - Sale', 'W - Inherited', 'X - OptEx',
+            '52w_GDP_change', '104w_GDP_change', 'FEDFUNDS', '26w_FEDFUNDS_change',
+            '52w_FEDFUNDS_change', '-1w_change']
+
+        if not scaler:
+            self.scaler = StandardScaler()
+            self.scaler.fit(self.data[self.x_columns].values)
+        else:
+            self.scaler = scaler
+
+        self.data.loc[:, self.x_columns] = self.scaler.transform(self.data[self.x_columns].values)
         self.group_column = group_column
         self.seq_length = seq_length
         self.n_weeks = n_weeks + 1
@@ -187,24 +153,19 @@ class GroupedSequenceDataset(Dataset):
 
     def __getitem__(self, idx):
         sequence = self.sequences[idx]
-        X = torch.Tensor(sequence[['price', 'qty', 'owned',
-            'delta_owned', 'value', 'is_dir', 'is_ceo', 'is_major_steakholder',
-            'd_to_filling', 'A - Grant', 'C - Converted deriv',
-            'D - Sale to issuer', 'F - Tax', 'G - Gift', 'M - OptEx',
-            'P - Purchase', 'S - Sale', 'W - Inherited', 'X - OptEx',
-            '52w_GDP_change', '104w_GDP_change', 'FEDFUNDS', '26w_FEDFUNDS_change',
-            '52w_FEDFUNDS_change', '-1w_change']].values)
-        y = torch.Tensor(sequence[[f"{i}w_change" for i in range(1, self.n_weeks)]].values)
+        X = torch.Tensor(sequence[self.x_columns].values)
+        y = torch.Tensor(sequence[[f"{i}w_change" for i in range(1, self.n_weeks)]].tail(1).values[0] * 100)
         return X, y
+    
 
 # Training Function
 def train_model(model, dataloader_trian, dataloader_test, criterion, optimizer, device, epochs=10):
     model.to(device)
     print(f"Training on {device}")
-    scheduler1 = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[3, 30], gamma=0.1)
+    scheduler1 = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[5, 15, 50, 200, 400], gamma=0.5)
     for epoch in range(epochs):
         model.train()
-        total_loss = torch.zeros(4).to(device)
+        total_loss = torch.zeros(1).to(device)
         loop_obj = tqdm(dataloader_trian)
         c = 0
         for batch_X, batch_y in loop_obj:
@@ -218,13 +179,13 @@ def train_model(model, dataloader_trian, dataloader_test, criterion, optimizer, 
             
             # Compute loss
             loss = criterion(outputs, batch_y)
-            total_loss += loss.mean(axis=[0, 1])
+            total_loss += loss.item()
             c += 1
             
             # Backward pass and optimization
-            loss.mean().backward()
+            loss.backward()
             optimizer.step()
-            loop_obj.set_description(f"Loss {total_loss.mean().item()/c}")
+            loop_obj.set_description(f"Loss {total_loss/c}")
 
         
         test_total_loss = 0
@@ -233,51 +194,62 @@ def train_model(model, dataloader_trian, dataloader_test, criterion, optimizer, 
 
             # Forward pass
             test_outputs = model(batch_test_X)
-
             
             # Compute loss
             test_loss = criterion(test_outputs, batch_test_y)
-            test_total_loss += test_loss.mean().item()
+            test_total_loss += test_loss.item()
            
-        x = [1, 2, 3, 4]
-        plt.plot(x, batch_test_y.cpu().detach().numpy()[0][-1], label="Ground truth")
-        plt.plot(x, test_outputs.cpu().detach().numpy()[0][-1], label="Prediction")
-        plt.legend()
-        plt.savefig(f"graphs/graph_{epoch + 1}.png")
-
-        print(" ".join([f"Loss for {i}w_change: {l.item() / len(dataloader_trian)}" for i, l in enumerate(total_loss)]))
-        print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss.mean().item() / len(dataloader_trian)}, Learning Rate: {scheduler1.get_last_lr()}, Test Loss: {test_total_loss / len(dataloader_test)}")
+        # print(" ".join([f"Loss for {i}w_change: {l.item() / len(dataloader_trian)}" for i, l in enumerate(total_loss)]))
+        print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss.item() / len(dataloader_trian)}, Learning Rate: {scheduler1.get_last_lr()}, Test Loss: {test_total_loss / len(dataloader_test)}")
         scheduler1.step()
 
 # Example Usage
 if __name__ == "__main__":
+
     # Example data
-    n = 48  # Sequence length
-    start_time = datetime.datetime.strptime("01-01-2015", "%d-%m-%Y")
-    end_time = datetime.datetime.strptime("01-01-2022", "%d-%m-%Y")
+    n = 4  # Sequence length
+    start_time = datetime.datetime.strptime("01-01-2014", "%d-%m-%Y")
+    start_time_week = TradeDataset.date_to_week(start_time)
+
+    end_time = datetime.datetime.strptime("28-02-2017", "%d-%m-%Y")
+    end_time_week = TradeDataset.date_to_week(end_time)
+    print(f"Training from week {start_time_week} to week {end_time_week}")
+
+    start_test_time = datetime.datetime.strptime("01-03-2017", "%d-%m-%Y")
+    start_test_time_week = TradeDataset.date_to_week(start_test_time)
+
+    end_test_time = datetime.datetime.strptime("30-06-2017", "%d-%m-%Y")
+    end_test_time_week = TradeDataset.date_to_week(end_test_time)
+    print(f"Training from week {start_test_time_week} to week {end_test_time_week}")
+
+    dataset_file_name = "dataset2.csv"
+    n_weeks_predicted = 4
+    ticker = "LEG"
 
     # Create dataset and dataloader for train
-    n_weeks_predicted = 4
-    dataset = GroupedSequenceDataset("dataset.csv", n_weeks=n_weeks_predicted, start_week=700, end_week=1100)
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+    dataset = GroupedSequenceDataset(dataset_file_name, ticker=ticker, n_weeks=n_weeks_predicted, start_week=start_time_week, end_week=end_time_week, seq_length=n)
+    dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
+    print(f"Train has {len(dataset)} samples")
 
     # Create dataset and dataloader for test
-    test_dataset = GroupedSequenceDataset("dataset.csv", n_weeks=n_weeks_predicted, start_week=1100, end_week=1200)
-    test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=True)
+    test_dataset = GroupedSequenceDataset(dataset_file_name, ticker=ticker, n_weeks=n_weeks_predicted, start_week=start_test_time_week, end_week=end_test_time_week, scaler=dataset.scaler, seq_length=n)
+    test_dataloader = DataLoader(test_dataset, batch_size=16, shuffle=True)
+    print(f"Train has {len(test_dataset)} samples")
 
     # Initialize model
-    input_dim = 25
-    output_dim = n_weeks_predicted
-    seq_len = n
-    model = TransAm(input_dim=input_dim, output_dim=output_dim, feature_size=256, seq_len=seq_len, n_head=8, num_layers=2, dropout=0.5)
+    input_dim = 26
+    model = TransAm(output_dim=n_weeks_predicted, 
+                    feature_size=input_dim, seq_len=n, 
+                    n_head=2, num_layers=1,
+                    dropout=0.5, dim_feedforward=8)
 
-    torchinfo.summary(model, input_size=(32, seq_len, input_dim), col_names=["input_size", "output_size", "num_params", "kernel_size"], device="cpu")
+    torchinfo.summary(model, input_size=(16, n, input_dim), col_names=["input_size", "output_size", "num_params", "kernel_size"], device="cpu")
     # Loss function and optimizer
-    criterion = nn.MSELoss(reduction='none')
-    optimizer = optim.AdamW(model.parameters(), lr=0.01)
+    criterion = nn.MSELoss(reduction='mean')
+    optimizer = optim.AdamW(model.parameters(), lr=0.001)
 
     # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Train the model
-    train_model(model, dataloader, test_dataloader, criterion, optimizer, device, epochs=50)
+    train_model(model, dataloader, test_dataloader, criterion, optimizer, device, epochs=600)
