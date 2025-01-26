@@ -10,6 +10,7 @@ import math
 import torchinfo 
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
+import os
 
 
 # Positional Encoding
@@ -29,17 +30,15 @@ class PositionalEncoding(nn.Module):
         return x + self.encoding[:, :x.size(1), :].to(x.device)
     
 
-class TransAm(nn.Module):
+class TransformerModel(nn.Module):
     def __init__(self, feature_size=250, 
                  output_dim=1, seq_len=16, 
                  num_layers=1, n_head=8,
                  dropout=0.1, dim_feedforward=16):
-        super(TransAm, self).__init__()
+        super(TransformerModel, self).__init__()
         self.model_type = 'Transformer'
         self.src_mask = None
-        
-        # self.embedding = nn.Linear(input_dim, feature_size)
-        
+
         self.pos_encoder = PositionalEncoding(feature_size)
         
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=feature_size, nhead=n_head, dropout=dropout, dim_feedforward=dim_feedforward)
@@ -59,20 +58,13 @@ class TransAm(nn.Module):
             device = src.device
             mask = self._generate_square_subsequent_mask(src.size(1)).to(device)
             self.src_mask = mask
-
-        # Apply embedding layer
-        # src = self.embedding(src)  # Shape: (batch_size, seq_len, feature_size)
         
-        # Permute to (seq_len, batch_size, feature_size)
         src = src.permute(1, 0, 2)
         
-        # Add positional encoding
         src = self.pos_encoder(src)
         
-        # Transformer encoder
         output = self.transformer_encoder(src, self.src_mask)
         
-        # Permute back to (batch_size, seq_len, feature_size) and decode
         output = output.permute(1, 0, 2)
         output = output.flatten(start_dim=1)
         output = self.decoder(output)
@@ -126,12 +118,10 @@ class GroupedSequenceDataset(Dataset):
         self.seq_length = seq_length
         self.n_weeks = n_weeks + 1
 
-        # Group data by the group_column
         self.groups = [
             group.sort_values("abs_week", ascending=True) for _, group in self.data.groupby(group_column)
         ]
 
-        # Generate sequences for each group
         self.sequences = []
         for group in self.groups:
             self._create_sequences(group)
@@ -141,8 +131,6 @@ class GroupedSequenceDataset(Dataset):
         Create sequences of length seq_length for a single group.
         """
         num_sequences = len(group) - self.seq_length + 1
-        if num_sequences <= 0:
-            return  # Skip groups smaller than seq_length
 
         for i in range(num_sequences):
             sequence = group.iloc[i:i + self.seq_length]
@@ -174,15 +162,12 @@ def train_model(model, dataloader_trian, dataloader_test, criterion, optimizer, 
 
             batch_X, batch_y = batch_X.to(device), batch_y.to(device)
 
-            # Forward pass
             outputs = model(batch_X)
             
-            # Compute loss
             loss = criterion(outputs, batch_y)
             total_loss += loss.item()
             c += 1
             
-            # Backward pass and optimization
             loss.backward()
             optimizer.step()
             loop_obj.set_description(f"Loss {total_loss/c}")
@@ -192,21 +177,19 @@ def train_model(model, dataloader_trian, dataloader_test, criterion, optimizer, 
         for batch_test_X, batch_test_y in dataloader_test:
             batch_test_X, batch_test_y = batch_test_X.to(device), batch_test_y.to(device) 
 
-            # Forward pass
             test_outputs = model(batch_test_X)
             
-            # Compute loss
             test_loss = criterion(test_outputs, batch_test_y)
             test_total_loss += test_loss.item()
            
-        # print(" ".join([f"Loss for {i}w_change: {l.item() / len(dataloader_trian)}" for i, l in enumerate(total_loss)]))
         print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss.item() / len(dataloader_trian)}, Learning Rate: {scheduler1.get_last_lr()}, Test Loss: {test_total_loss / len(dataloader_test)}")
         scheduler1.step()
+
+    return model
 
 # Example Usage
 if __name__ == "__main__":
 
-    # Example data
     n = 4  # Sequence length
     start_time = datetime.datetime.strptime("01-01-2014", "%d-%m-%Y")
     start_time_week = TradeDataset.date_to_week(start_time)
@@ -238,18 +221,18 @@ if __name__ == "__main__":
 
     # Initialize model
     input_dim = 26
-    model = TransAm(output_dim=n_weeks_predicted, 
+    model = TransformerModel(output_dim=n_weeks_predicted, 
                     feature_size=input_dim, seq_len=n, 
                     n_head=2, num_layers=1,
                     dropout=0.5, dim_feedforward=8)
 
     torchinfo.summary(model, input_size=(16, n, input_dim), col_names=["input_size", "output_size", "num_params", "kernel_size"], device="cpu")
-    # Loss function and optimizer
+    
     criterion = nn.MSELoss(reduction='mean')
     optimizer = optim.AdamW(model.parameters(), lr=0.001)
 
-    # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Train the model
-    train_model(model, dataloader, test_dataloader, criterion, optimizer, device, epochs=600)
+    model = train_model(model, dataloader, test_dataloader, criterion, optimizer, device, epochs=200)
+    torch.save(model.state_dict(), os.path.join("models", f"{ticker}_{n}_{end_test_time_week}")) 
