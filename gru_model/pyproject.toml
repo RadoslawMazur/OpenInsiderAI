@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "gru_model"
+version = "0.1.0"
+description = ""
+authors = ["goostaw01 <goostaw.projekt@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+pandas = "^2.2.3"
+scikit-learn = "^1.6.0"
+statsmodels = "^0.14.4"
+seaborn = "^0.13.2"
+matplotlib = "^3.10.0"
+tqdm = "^4.67.1"
+yfinance = "^0.2.51"
+tensorflow = "2.18"
+structlog = "^24.4.0"
+torch = "^2.5.1"
+pmdarima = "^2.0.4"
+numpy = "2.0.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
