@@ -6,7 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from scipy.ndimage import gaussian_filter1d
+from sklearn.model_selection import train_test_split
 
 hidden_dim = 32
 num_layers = 2
@@ -15,11 +15,14 @@ batch_size = 16
 learning_rate = 0.002
 dropout_prob = 0.2
 TICK = 'MORN'
-early_stopping_patience = 25
+early_stopping_patience = 7
+patience = 3
+best_loss = np.inf
+
 
 # Utworzenie datasetu do trenowania modelu GRU
 class GroupedSequenceDataset(Dataset):
-    def __init__(self, csv_file: str, group_column: str = "tick", seq_length: int = 8, n_weeks: int = 4):
+    def __init__(self, csv_file: str, group_column: str = "tick", seq_length: int = 4, n_weeks: int = 4):
         data = pd.read_csv(csv_file)
         data.fillna(0, inplace=True)
         data = data[data['tick'] == TICK]
@@ -48,8 +51,11 @@ class GroupedSequenceDataset(Dataset):
         X = torch.tensor(sequence[[
             'price', 'qty', 'owned', 'delta_owned', 'value', 'is_dir', 'is_ceo',
             'is_major_steakholder', 'd_to_filling', '52w_GDP_change', '104w_GDP_change',
-            'FEDFUNDS', '26w_FEDFUNDS_change', '52w_FEDFUNDS_change', '-1w_change'
+            'FEDFUNDS', '26w_FEDFUNDS_change', '52w_FEDFUNDS_change', '-1w_change',
+            'A - Grant', 'C - Converted deriv', 'D - Sale to issuer', 'F - Tax',
+            'G - Gift', 'M - OptEx', 'P - Purchase', 'S - Sale', 'W - Inherited', 'X - OptEx'
         ]].values, dtype=torch.float32)
+
         y = torch.tensor(sequence[[f"{i}w_change" for i in range(1, self.n_weeks + 1)]].iloc[-1].values, dtype=torch.float32)
         return X, y
 
@@ -67,15 +73,28 @@ for X_batch, y_batch in data_loader:
 X = np.concatenate(X_batches)
 y = np.concatenate(y_batches)
 
-# Podział na zbiór treningowy losowo i testowy w kolejności
-from sklearn.model_selection import train_test_split
+test_size = 0.1 # Ostatnie 10% danych na testy 
+validation_size = 0.15 # 15% danych na walidację z treningowych 
 
-X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.2, random_state=42)
+test_split_idx = int(len(X) * (1 - test_size)) 
+validation_split_idx = int(test_split_idx * (1 - validation_size)) 
 
-# Testowy zbiór jest sekwencyjny
-split_ratio = 0.5  # Dzielimy zbiór tymczasowy na pół
 
-X_validation, X_test, y_validation, y_test = X_temp[:int(len(X_temp) * split_ratio)], X_temp[int(len(X_temp) * split_ratio):], y_temp[:int(len(y_temp) * split_ratio)], y_temp[int(len(y_temp) * split_ratio):]
+X_train = X[:validation_split_idx] 
+y_train = y[:validation_split_idx] 
+X_validation = X[validation_split_idx:test_split_idx] 
+y_validation = y[validation_split_idx:test_split_idx] 
+
+X_test = X[test_split_idx:] 
+y_test = y[test_split_idx:] 
+
+
+# X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# # Testowy zbiór jest sekwencyjny
+# split_ratio = 0.5
+
+# X_validation, X_test, y_validation, y_test = X_temp[:int(len(X_temp) * split_ratio)], X_temp[int(len(X_temp) * split_ratio):], y_temp[:int(len(y_temp) * split_ratio)], y_temp[int(len(y_temp) * split_ratio):]
 
 # Skalowanie danych przez StandardScaler
 scaler_X = StandardScaler()
@@ -114,7 +133,7 @@ model = GRUModel(input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_laye
 
 # MSE loss i Adam optimizer
 criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 
 
@@ -197,6 +216,16 @@ for epoch in range(num_epochs):
 
     print(f"Epoch {epoch + 1}/{num_epochs}, Training MSE: {train_mse_original:.4f}, Validation MSE: {validation_mse_original:.4f}")
 
+    if validation_mse_original < best_loss:
+        best_loss = validation_mse_original
+        early_stopping_counter = 0
+    else:
+        early_stopping_counter += 1
+    
+    if early_stopping_counter >= early_stopping_patience:
+        print(f"Early stopping at epoch {epoch + 1}")
+        break
+
 # Wykres strat treningowych i walidacyjnych w czasie
 plt.figure(figsize=(10, 6))
 plt.plot(train_losses, label="Training MSE over epochs")
@@ -207,7 +236,7 @@ plt.title(f"{TICK} -Training and Validation Loss Over Time")
 plt.legend()
 plt.grid()
 
-
+# model = torch.load(f"MORN_66.10.pth")
 # Testowanie modelu
 model.eval()
 
@@ -233,17 +262,18 @@ print(f"Mean Squared Error (MSE): {mse:.4f}")
 plt.savefig(f"companies/{TICK}validations-mse{mse:.2f}-hidden_dim{hidden_dim}-layers{num_layers}-epochs{num_epochs}-batch_size{batch_size}-learing_rate{learning_rate}-dropout{dropout_prob}.png")
 
 # Zapisanie modelu
-torch.save(model, f"{TICK}_{mse:.2f}.pth")
+# torch.save(model, f"{TICK}_{mse:.2f}.pth")
 
 # Wykresy dla kolejnych tygodni
 fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 axes = axes.flatten()
 for week in range(4):
-    smoothed_predictions = gaussian_filter1d(predictions_original[:, week], sigma=2)
-    smoothed_actuals = gaussian_filter1d(actuals_original[:, week], sigma=2)
-    weeks = np.arange(len(smoothed_predictions)) + 1
-    axes[week].plot(weeks, smoothed_predictions, label=f"Predicted {week + 1} week change")
-    axes[week].plot(weeks, smoothed_actuals, label=f"Actual {week + 1} week change")
+    predictions = predictions_original[:, week]
+    actuals = actuals_original[:, week]
+    weeks = np.arange(len(predictions)) + 1  # Oś X odpowiada tygodniom
+
+    axes[week].plot(weeks, predictions, label=f"Predicted {week + 1} week change")
+    axes[week].plot(weeks, actuals, label=f"Actual {week + 1} week change")
     axes[week].set_xlabel("Weeks")
     axes[week].set_ylabel("Value")
     axes[week].set_title(f"{TICK} Predictions vs Actuals ({week + 1} week change)")
@@ -251,3 +281,20 @@ for week in range(4):
 
 plt.tight_layout()
 plt.savefig(f"companies/{TICK}predictions-mse{mse:.2f}-hidden_dim{hidden_dim}-layers{num_layers}-epochs{num_epochs}-batch_size{batch_size}-learing_rate{learning_rate}-dropout{dropout_prob}.png")
+
+fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+axes = axes.flatten()
+for week in range(4):
+    predictions = predictions_original[:, week]
+    actuals = actuals_original[:, week]
+    errors = predictions - actuals  # Obliczenie błędów
+
+    axes[week].hist(errors, bins=20, alpha=0.7, label=f"Error Distribution ({week + 1} week change)")
+    axes[week].axvline(0, color='red', linestyle='--', label="Zero Error")
+    axes[week].set_xlabel("Prediction Error")
+    axes[week].set_ylabel("Frequency")
+    axes[week].set_title(f"{TICK} Error Distribution ({week + 1} week change)")
+    axes[week].legend()
+
+plt.tight_layout()
+plt.savefig(f"companies/{TICK}hist-mse{mse:.2f}-hidden_dim{hidden_dim}-layers{num_layers}-epochs{num_epochs}-batch_size{batch_size}-learing_rate{learning_rate}-dropout{dropout_prob}.png")
