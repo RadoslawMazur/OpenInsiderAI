@@ -11,6 +11,7 @@ import torchinfo
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 import os
+import torchview
 
 
 # Positional Encoding
@@ -32,7 +33,7 @@ class PositionalEncoding(nn.Module):
 
 class TransformerModel(nn.Module):
     def __init__(self, feature_size=250, 
-                 output_dim=1, seq_len=16, 
+                 output_dim=4, seq_len=16, 
                  num_layers=1, n_head=8,
                  dropout=0.1, dim_feedforward=16):
         super(TransformerModel, self).__init__()
@@ -81,7 +82,7 @@ class TransformerModel(nn.Module):
 class GroupedSequenceDataset(Dataset):
     def __init__(self, 
                  csv_file: str,
-                 ticker: str,
+                 ticker: str = None,
                  group_column: str = "tick", 
                  seq_length: int = 8, 
                  n_weeks: int = 4, 
@@ -97,7 +98,16 @@ class GroupedSequenceDataset(Dataset):
         """
         data = pd.read_csv(csv_file)
         self.data = data[data["abs_week"].between(start_week, end_week)]
-        self.data = self.data[self.data["tick"] == ticker]
+
+        if ticker:
+            self.data = self.data[self.data["tick"] == ticker]
+
+        change_vols = self.data["-1w_change_volume"].unique()
+        change_vols.sort()
+        self.data.loc[self.data["-1w_change_volume"] == self.data["-1w_change_volume"].max(), "-1w_change_volume"] = change_vols[-2]
+
+        self.min_week = self.data["abs_week"].min()
+        self.max_week = self.data["abs_week"].max()
 
         self.x_columns = ['qty', 'owned', 'volume', '-1w_change_volume',
             'delta_owned', 'value', 'is_dir', 'is_ceo', 'is_major_steakholder',
@@ -146,11 +156,54 @@ class GroupedSequenceDataset(Dataset):
         return X, y
     
 
+def plot_training(n_epochs, train_losses, test_losses, learning_rates, ticker=None):
+    """
+    Plots training losses, test losses, and learning rates over the epochs.
+
+    Parameters:
+    n_epochs (int): Number of epochs
+    train_losses (list): List of training loss values per epoch
+    test_losses (list): List of test/validation loss values per epoch
+    learning_rates (list): List of learning rates per epoch
+    """
+    epochs = range(1, n_epochs + 1)  # Create a list of epoch numbers
+    
+    # Create the figure and axes
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+
+    # Plot training and test losses
+    ax1.set_title("Training Progress")
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Loss")
+    ax1.plot(epochs, train_losses, label="Train Loss", color="blue", marker="o")
+    ax1.plot(epochs, test_losses, label="Test Loss", color="red", marker="o")
+    ax1.legend(loc="upper left")
+    ax1.grid(True, linestyle="--", alpha=0.6)
+
+    # Create a twin y-axis to plot learning rate
+    ax2 = ax1.twinx()
+    ax2.set_ylabel("Learning Rate")
+    ax2.plot(epochs, learning_rates, label="Learning Rate", color="green", linestyle="--")
+    ax2.legend(loc="upper right")
+
+    # Show the plot
+    plt.tight_layout()
+
+    if not ticker:
+        ticker = "all"
+
+    plt.savefig(f"training_{ticker}.png")
+
+
+
 # Training Function
-def train_model(model, dataloader_trian, dataloader_test, criterion, optimizer, device, epochs=10):
+def train_model(model, dataloader_trian, dataloader_test, criterion, optimizer, device, epochs=10, ticker=None):
     model.to(device)
     print(f"Training on {device}")
-    scheduler1 = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[5, 15, 50, 200, 400], gamma=0.5)
+    train_losses = []
+    test_losses = []
+    learning_rates = []
+    scheduler1 = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[5, 15, 50, 150], gamma=0.5)
     for epoch in range(epochs):
         model.train()
         total_loss = torch.zeros(1).to(device)
@@ -181,11 +234,19 @@ def train_model(model, dataloader_trian, dataloader_test, criterion, optimizer, 
             
             test_loss = criterion(test_outputs, batch_test_y)
             test_total_loss += test_loss.item()
+
+        train_losses.append(total_loss.item() / len(dataloader_trian))
+        test_losses.append(test_total_loss / len(dataloader_test))
+        learning_rates.append(scheduler1.get_last_lr())
            
         print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss.item() / len(dataloader_trian)}, Learning Rate: {scheduler1.get_last_lr()}, Test Loss: {test_total_loss / len(dataloader_test)}")
         scheduler1.step()
 
-    return model
+    plot_training(epochs, train_losses, test_losses, learning_rates, ticker)
+    last_epoch_loss = total_loss.item() / len(dataloader_trian)
+    last_epoch_test_loss = test_total_loss / len(dataloader_test)
+
+    return model, last_epoch_loss, last_epoch_test_loss
 
 # Example Usage
 if __name__ == "__main__":
@@ -207,7 +268,8 @@ if __name__ == "__main__":
 
     dataset_file_name = "dataset2.csv"
     n_weeks_predicted = 4
-    ticker = "LEG"
+    #ticker = "LEG"
+    ticker = None
 
     # Create dataset and dataloader for train
     dataset = GroupedSequenceDataset(dataset_file_name, ticker=ticker, n_weeks=n_weeks_predicted, start_week=start_time_week, end_week=end_time_week, seq_length=n)
@@ -227,6 +289,7 @@ if __name__ == "__main__":
                     dropout=0.5, dim_feedforward=8)
 
     torchinfo.summary(model, input_size=(16, n, input_dim), col_names=["input_size", "output_size", "num_params", "kernel_size"], device="cpu")
+    torchview.draw_graph(model, input_size=(16, n, input_dim), device="cpu", filename="model_graph.png", graph_name="Transformer model", save_graph=True)
     
     criterion = nn.MSELoss(reduction='mean')
     optimizer = optim.AdamW(model.parameters(), lr=0.001)
@@ -234,5 +297,5 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Train the model
-    model = train_model(model, dataloader, test_dataloader, criterion, optimizer, device, epochs=200)
+    model, _, _ = train_model(model, dataloader, test_dataloader, criterion, optimizer, device, epochs=50, ticker=ticker)
     torch.save(model.state_dict(), os.path.join("models", f"{ticker}_{n}_{end_test_time_week}")) 
